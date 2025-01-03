@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['src\\mapasWRC.py'],
+    ['mapasWRC.py'],
     pathex=[],
     binaries=[],
     datas=[('./resources/icon.ico', './resources/'), ('./resources/logoDP.png', '.')],
