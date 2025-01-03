@@ -1,0 +1,5 @@
+matplotlib
+geopandas
+fiona
+PyQt5
+pyinstaller
