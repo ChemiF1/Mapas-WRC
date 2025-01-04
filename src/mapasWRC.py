@@ -7,9 +7,9 @@ from matplotlib.figure import Figure
 import sys
 from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget,
-                             QVBoxLayout, QComboBox, QPushButton, QLabel, QHBoxLayout, QColorDialog, QLineEdit, QMessageBox, QFileDialog)
+                             QVBoxLayout, QComboBox, QPushButton, QLabel, QHBoxLayout, QColorDialog, QLineEdit, QMessageBox, QFileDialog, QGridLayout)
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QMouseEvent
 
 fiona.drvsupport.supported_drivers['kml'] = 'rw' # enable KML support which is disabled by default
 fiona.drvsupport.supported_drivers['KML'] = 'rw' # enable KML support which is disabled by default
@@ -29,6 +29,50 @@ class PlotCanvas(FigureCanvas):
         # self.ax.set_ylabel('Y-axis')
         self.ax.axis("off")
         self.draw()
+
+class PlotCanvasDrawable(PlotCanvas):
+    def mousePressEvent(self, event: QMouseEvent):
+        # solo si el botón correspondiente está activado
+        if self.window().toggle_button.isChecked():
+            # Tamaño del canvas en píxeles
+            width, height = self.size().width(), self.size().height()
+
+            # Coordenadas del clic en píxeles
+            mouse_x, mouse_y = event.x(), event.y()
+
+            # Invertimos la coordenada vertical porque la matplotlib y qt van al revés
+            mouse_y = height - mouse_y
+
+            # Obtener el área ocupada por el gráfico
+            bbox = self.ax.get_position()  # Bounding box del área de los ejes
+            x0, y0, x1, y1 = bbox.x0, bbox.y0, bbox.x1, bbox.y1
+
+            # Escalamos las coordenadas
+            ax_left, ax_bottom = x0 * width, y0 * height
+            ax_right, ax_top = x1 * width, y1 * height
+
+            # Comprobamos si el clic está dentro del área del gráfico
+            if not (ax_left <= mouse_x <= ax_right and ax_bottom <= mouse_y <= ax_top):
+                return
+
+            # Calculamos las coordenadas relativas dentro del área del gráfico
+            rel_x = (mouse_x - ax_left) / (ax_right - ax_left)
+            rel_y = (mouse_y - ax_bottom) / (ax_top - ax_bottom)
+
+            # Obtenemos los límites visibles del gráfico
+            x_min, x_max = self.ax.viewLim.intervalx
+            y_min, y_max = self.ax.viewLim.intervaly
+
+            # Mapeamos las coordenadas relativas a las del gráfico
+            data_x = x_min + rel_x * (x_max - x_min)
+            data_y = y_min + rel_y * (y_max - y_min)
+
+            # Añadimos una etiqueta en las coordenadas
+            self.ax.text(data_x, data_y, "⚑", color="red", fontsize=10)
+            self.draw()
+
+        super().mousePressEvent(event)
+
 
 class MainWindow(QMainWindow):
     def __init__(self, layers):
@@ -116,14 +160,26 @@ class MainWindow(QMainWindow):
         self.plot_button.clicked.connect(self.generate_plot)
         self.plot_button.setEnabled(False)
 
-        self.plot_canvas = PlotCanvas(self)
+        self.toggle_button = QPushButton("⚑", self)
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(False)
+        
+        # organizamos los dos botones en una fila horizontal
+        self.grid = QGridLayout()
+        self.grid.setColumnStretch(0, 1)
+        self.grid.setColumnStretch(1, 0)
+        self.grid.addWidget(self.plot_button)
+        self.grid.addWidget(self.toggle_button)
+
+
+        self.plot_canvas = PlotCanvasDrawable(self)
 
         self.status_label = QLabel("Select values from both dropdowns.")
         self.status_label.setAlignment(Qt.AlignCenter)
 
         layout.addWidget(self.first_dropdown)
         layout.addWidget(self.second_dropdown)
-        layout.addWidget(self.plot_button)
+        layout.addLayout(self.grid)
         layout.addWidget(self.plot_canvas)
         layout.addWidget(self.status_label)
 
