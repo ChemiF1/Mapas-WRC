@@ -3,3 +3,7 @@ geopandas
 fiona
 PyQt5
 pyinstaller
+PySide6
+contextily
+math
+shapely
