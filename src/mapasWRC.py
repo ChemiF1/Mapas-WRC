@@ -1,572 +1,804 @@
+from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QLabel, QVBoxLayout, QHBoxLayout, QFileDialog, QComboBox, QListWidget, QColorDialog, QDialog,\
+    QInputDialog, QLineEdit, QListWidgetItem, QMessageBox, QSpacerItem, QSizePolicy
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor  # Asegúrate de importar esto
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from PySide6.QtCore import Signal
+import sys
+import os
 import geopandas as gpd
 import fiona
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import (FigureCanvasQTAgg as FigureCanvas)
-from matplotlib.figure import Figure
-
-import sys
-from pathlib import Path
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget,
-                             QVBoxLayout, QComboBox, QPushButton, QLabel, QHBoxLayout, QColorDialog, QLineEdit, QMessageBox, QFileDialog, QGridLayout)
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QIcon, QMouseEvent
+import contextily as ctx
+import math
+from shapely.geometry import LineString
+from shapely.ops import substring
 
 fiona.drvsupport.supported_drivers['kml'] = 'rw' # enable KML support which is disabled by default
 fiona.drvsupport.supported_drivers['KML'] = 'rw' # enable KML support which is disabled by default
 
-class PlotCanvas(FigureCanvas):
-    def __init__(self, parent=None):
-        self.fig, self.ax = Figure(figsize=(16, 10)), None
-        self.ax = self.fig.add_subplot(111)
-        super().__init__(self.fig)
-        self.setParent(parent)
-
-    def plot(self, x, y, longitud_total):
-        self.ax.clear()
-        self.ax.plot(x, y, lw = 2, color = "black")
-        self.ax.set_title(name + " - Longitud: " + f"{longitud_total:.2f} km" )
-        # self.ax.set_xlabel('X-axis')
-        # self.ax.set_ylabel('Y-axis')
-        self.ax.axis("off")
-        self.draw()
-
-class PlotCanvasDrawable(PlotCanvas):
-    def mousePressEvent(self, event: QMouseEvent):
-        # solo si el botón correspondiente está activado
-        if self.window().toggle_button.isChecked():
-            # Tamaño del canvas en píxeles
-            width, height = self.size().width(), self.size().height()
-
-            # Coordenadas del clic en píxeles
-            mouse_x, mouse_y = event.x(), event.y()
-
-            # Invertimos la coordenada vertical porque la matplotlib y qt van al revés
-            mouse_y = height - mouse_y
-
-            # Obtener el área ocupada por el gráfico
-            bbox = self.ax.get_position()  # Bounding box del área de los ejes
-            x0, y0, x1, y1 = bbox.x0, bbox.y0, bbox.x1, bbox.y1
-
-            # Escalamos las coordenadas
-            ax_left, ax_bottom = x0 * width, y0 * height
-            ax_right, ax_top = x1 * width, y1 * height
-
-            # Comprobamos si el clic está dentro del área del gráfico
-            if not (ax_left <= mouse_x <= ax_right and ax_bottom <= mouse_y <= ax_top):
-                return
-
-            # Calculamos las coordenadas relativas dentro del área del gráfico
-            rel_x = (mouse_x - ax_left) / (ax_right - ax_left)
-            rel_y = (mouse_y - ax_bottom) / (ax_top - ax_bottom)
-
-            # Obtenemos los límites visibles del gráfico
-            x_min, x_max = self.ax.viewLim.intervalx
-            y_min, y_max = self.ax.viewLim.intervaly
-
-            # Mapeamos las coordenadas relativas a las del gráfico
-            data_x = x_min + rel_x * (x_max - x_min)
-            data_y = y_min + rel_y * (y_max - y_min)
-
-            # Añadimos una etiqueta en las coordenadas
-            self.ax.text(data_x, data_y, "⚑", color="red", fontsize=10)
-            self.draw()
-
-        super().mousePressEvent(event)
 
 
-class MainWindow(QMainWindow):
-    def __init__(self, layers):
+def split_line_variable_lengths(gdf_segment, segment_lengths, start_distance=0, end_distance=None):
+    """
+    Divide una línea en segmentos de longitudes variables especificadas en una lista.
+
+    Parameters:
+        gdf_segment (GeoDataFrame): GeoDataFrame con un único LineString en la columna 'geometry'.
+        segment_lengths (list): Lista con las longitudes de cada segmento.
+
+    Returns:
+        GeoDataFrame: Nuevo GeoDataFrame con los segmentos generados.
+    """
+    line = gdf_segment.geometry.iloc[0]
+    total_length = gdf_segment.length_m.iloc[0]
+
+    if not isinstance(line, LineString):
+        return gdf_segment  
+
+    if end_distance is None or end_distance > total_length:
+        end_distance = total_length  
+
+    segments_list = []
+    current_distance = max(0, start_distance)  
+
+    for segment in segment_lengths:
+        next_distance = min(segment['end'], end_distance)  
+        segment_geom = substring(line, segment['start'], next_distance)
+        segments_list.append(segment_geom)
+        current_distance = next_distance
+        if current_distance >= end_distance:
+            break
+
+    new_gdf = gpd.GeoDataFrame(geometry=segments_list, crs=gdf_segment.crs)
+
+    return new_gdf  
+    
+    
+    
+class FileSelector(QWidget):
+    def __init__(self):
         super().__init__()
-        self.setWindowTitle("Selección de Tramo")
-        
-        QApplication.setStyle("Fusion")
-        # QApplication.primaryScreen()
-        
-        
-        
-        screen = app.primaryScreen()
-        screen_size = screen.size()
-        self.setGeometry(0, 0, screen_size.width(), screen_size.height())
-        self.showMaximized()
-        
-        self.layers = layers
-        self.legend_items = []  # Inicializar la lista de elementos de la leyenda
-        self.longitud_total = 0  # Inicializar la longitud total
-        self.length_label = QLabel("Longitud Total: 0.00 km")
-        
-        self.longitud_total = 0  # Inicializar la longitud total
-        
-        # Inicializar las variables inicio_tramo y fin_tramo con valores predeterminados
-        self.inicio_tramo = 0.0  # Inicio por defecto en 0 km
-        self.fin_tramo = 10.0    # Fin por defecto en 10 km (o la longitud total del tramo)
-        self.section_size_input = 0.500 # Tamaño de la sección por defecto en 500 m
-        
-        self.tramos = []  # Lista para almacenar los tramos
-        self.tramos_colores = []  # Lista para los colores de los tramos (por ejemplo, estados)
-        self.current_start = 0.0  # Inicio del tramo actual
-        
-        self.tab_widget = QTabWidget()
-        self.setCentralWidget(self.tab_widget)
+        self.file_path = ""  # Variable para almacenar la ruta del archivo seleccionado
+        self.selected_segment = None  # Segmento seleccionado
+        self.length_m = 0  # Longitud del segmento seleccionado
+        self.gdf_segment = None
+        self.initUI()
 
-        # First Tab
-        self.first_tab = QWidget()
-        self.tab_widget.addTab(self.first_tab, "Visualización del Tramo")
-
-        self.second_tab = QWidget()
-        self.tab_widget.addTab(self.second_tab, "Leyenda")
+    def initUI(self):
+        """ Inicializa la interfaz gráfica """
+        self.setWindowTitle("Seleccionar Archivo KML")  # Título de la ventana
+        self.setGeometry(100, 100, 700, 700)  # Ajustamos el tamaño de la ventana
+        # self.showMaximized()  # Mostrar maximizado
+        self.setStyleSheet("""
+            background-color: #f4f4f4;
+            font-family: Arial;
+            font-size: 14px;
+        """)
         
-        self.third_tab = QWidget()
-        self.tab_widget.addTab(self.third_tab, "Tramos")
+        # Layout principal
+        self.layout = QVBoxLayout()
         
-        self.init_first_tab()
-        self.init_second_tab()
-        self.init_third_tab()
-
-        # Botones de navegación
-        self.navigation_layout = QHBoxLayout()
-        self.previous_button = QPushButton("Anterior")
-        self.previous_button.clicked.connect(self.go_to_previous_tab)
-        self.next_button = QPushButton("Siguiente")
-        self.next_button.clicked.connect(self.go_to_next_tab)
-
-        self.navigation_layout.addWidget(self.previous_button)
-        self.navigation_layout.addWidget(self.next_button)
-
-        # Configurar estado inicial de botones
-        self.update_navigation_buttons()
-
-        # Añadir layout de navegación al final
-        self.main_layout = QVBoxLayout()
-        self.main_layout.addWidget(self.tab_widget)
-        self.main_layout.addLayout(self.navigation_layout)
-
-        # Widget central
-        container = QWidget()
-        container.setLayout(self.main_layout)
-        self.setCentralWidget(container)
+        # Etiqueta para mostrar el archivo seleccionado
+        self.label = QLabel("Selecciona un archivo .kml", self)
+        self.layout.addWidget(self.label)
         
-        # FUNCIONES PARA PRIMERA PESTAÑA ****************************************************
-    def init_first_tab(self):
+        # Botón para seleccionar archivo
+        self.button = QPushButton("📂 Abrir Archivo", self)
+        self.button.setStyleSheet("background-color: #0078D7; color: white; padding: 8px; border-radius: 5px;")
+        self.button.clicked.connect(self.open_file)
+        self.layout.addWidget(self.button)
+        
+        # Layout horizontal para el ComboBox y el botón "Dibujar"
+        self.layer_layout = QHBoxLayout()
+        
+        # ComboBox para capas disponibles
+        self.layer_combo = QComboBox(self)
+        self.layer_combo.setEnabled(False)
+        self.layer_combo.setStyleSheet("background-color: white; padding: 5px; border-radius: 5px;")
+        self.layer_layout.addWidget(self.layer_combo)
+        
+        # Botón para dibujar la capa seleccionada
+        self.draw_button = QPushButton("🎨 Dibujar", self)
+        self.draw_button.setEnabled(False)
+        self.draw_button.setStyleSheet("background-color: #28A745; color: white; padding: 8px; border-radius: 5px;")
+        self.draw_button.clicked.connect(self.plot_layer)
+        self.layer_layout.addWidget(self.draw_button)
+        
+        self.layout.addLayout(self.layer_layout)
+        
+        # Lienzo de Matplotlib para mostrar gráficos (aumentado en tamaño)
+        self.figure, self.ax = plt.subplots(figsize=(8, 6))
+        self.ax.axis("off")  # Ocultar ejes desde el inicio
+        self.canvas = FigureCanvas(self.figure)
+        self.layout.addWidget(self.canvas, stretch=3)
+        
+        # Texto aclaratorio para la lista interactiva
+        self.list_label = QLabel("Selecciona un tramo:", self)
+        self.list_label.setStyleSheet("font-weight: bold; padding: 5px;")
+        self.layout.addWidget(self.list_label)
+    
+        # Lista interactiva para mostrar nombres de los segmentos
+        self.names_list = QListWidget(self)
+        self.names_list.setStyleSheet("background-color: white; padding: 5px; border-radius: 5px;")
+        self.names_list.itemEntered.connect(self.highlight_segment)
+        self.names_list.itemClicked.connect(self.select_segment)
+        self.layout.addWidget(self.names_list, stretch=1)
+        
+        # Etiqueta para mostrar el segmento seleccionado y su longitud
+        self.segment_label = QLabel("Segmento seleccionado: Ninguno", self)
+        self.segment_label.setStyleSheet("font-weight: bold; background-color: white; padding: 5px; border-radius: 5px;")
+        self.layout.addWidget(self.segment_label)
+
+        # Botón para pasar a la creación de la leyenda (Inicialmente deshabilitado)
+        self.legend_button = QPushButton("📜 Crear Leyenda", self)
+        self.legend_button.setEnabled(False)  # Deshabilitado hasta seleccionar un segmento
+        self.legend_button.setStyleSheet("background-color: grey; color: white; padding: 8px; border-radius: 5px;")
+        self.legend_button.clicked.connect(self.open_legend_creator)
+        self.layout.addWidget(self.legend_button)
+
+        # Botón para abrir el SegmentEditor
+        self.segment_editor_button = QPushButton("📏 Editar Tramos", self)
+        self.segment_editor_button.setEnabled(False)  # Deshabilitado hasta recibir datos
+        self.segment_editor_button.setStyleSheet("background-color: grey; color: white; padding: 8px; border-radius: 5px;")
+        self.segment_editor_button.clicked.connect(self.open_segment_editor)
+
+        # Añadir al layout en una posición adecuada
+        if hasattr(self, 'layout_buttons'):  # Si hay un layout de botones ya creado
+            self.layout_buttons.addWidget(self.segment_editor_button)
+        else:
+            self.layout.addWidget(self.segment_editor_button)  # Si no, se pone en el layout principal
+
+        # Botón para Dibujar Subsecciones
+        self.draw_subsections_button = QPushButton("🖼 Dibujar Subsecciones", self)
+        self.draw_subsections_button.setEnabled(False)  # Deshabilitado hasta recibir datos de leyenda
+        self.draw_subsections_button.setStyleSheet("background-color: grey; color: white; padding: 8px; border-radius: 5px;")
+        self.draw_subsections_button.clicked.connect(self.draw_subsections)
+        self.layout.addWidget(self.draw_subsections_button)
+
+
+        # Botón para salir del programa
+        self.exit_button = QPushButton("❌ Salir", self)
+        self.exit_button.setStyleSheet("background-color: #DC3545; color: white; padding: 8px; border-radius: 5px;")
+        self.exit_button.clicked.connect(self.close_application)
+        self.layout.addWidget(self.exit_button)
+        
+        self.setLayout(self.layout)
+        
+    def open_file(self):
+        """ Abre un cuadro de diálogo para seleccionar un archivo KML y carga las capas disponibles """
+        file_dialog = QFileDialog()
+        self.file_path, _ = file_dialog.getOpenFileName(self, "Seleccionar Archivo KML", "", "Archivos KML (*.kml)")
+        
+        if self.file_path:
+            file_name = os.path.basename(self.file_path)  # Extraer solo el nombre del archivo
+            self.label.setText(f"Archivo seleccionado: {file_name}")
+            self.load_layers()
+
+    def load_layers(self):
+        """ Carga y lista las capas disponibles en el archivo KML seleccionado """
+        try:
+            layers = fiona.listlayers(self.file_path)
+            self.layer_combo.clear()
+            self.layer_combo.addItems(layers)
+            self.layer_combo.setEnabled(True)
+            self.draw_button.setEnabled(True)
+        except Exception as e:
+            self.label.setText(f"Error cargando capas: {str(e)}")
+                  
+    def plot_layer(self):
+        """ Plotea la capa seleccionada en la GUI con mapa de fondo y muestra los nombres """
+        selected_layer = self.layer_combo.currentText()
+        
+        if not selected_layer:
+            self.label.setText("Selecciona una capa antes de dibujar")
+            return
+        
+        try:
+            self.gdf = gpd.read_file(self.file_path, driver="KML", layer=selected_layer)
+            self.gdf = self.gdf.to_crs(epsg=3857)
+            
+            self.ax.clear()
+            self.ax.axis("off")
+            self.gdf.plot(ax=self.ax, color="black", lw=2)
+            ctx.add_basemap(self.ax, crs=self.gdf.crs.to_string(), source=ctx.providers.OpenStreetMap.Mapnik)
+            
+            # Añadir nombres en el mapa
+            for idx, row in self.gdf.iterrows():
+                x, y = row.geometry.centroid.x, row.geometry.centroid.y
+                self.ax.text(x, y, row["Name"], fontsize=9, ha='center', color='blue', 
+                             bbox=dict(facecolor='white', alpha=0.7, edgecolor='black', boxstyle='round,pad=0.3'))
+            
+            self.canvas.draw()
+            
+            self.names_list.clear()
+            for name in self.gdf["Name"]:
+                self.names_list.addItem(name)
+            
+        except Exception as e:
+            self.label.setText(f"Error al dibujar: {str(e)}")
+    
+    def highlight_segment(self, item):
+        """ Plotea únicamente el segmento seleccionado y elimina los ejes """
+        self.ax.clear()
+        self.ax.axis("off")
+        self.selected_segment = item.text()
+        
+        self.gdf_segment = self.gdf[self.gdf["Name"] == self.selected_segment].to_crs(epsg=3099)
+        self.gdf_segment["length_m"] = self.gdf_segment["geometry"].length
+        self.length_m = self.gdf_segment["length_m"].iloc[0]
+        
+        self.gdf_segment.plot(ax=self.ax, color="black", lw=4)
+        self.gdf_segment.plot(ax=self.ax, color="white", lw=.5)
+        
+        # Añadir nombre del segmento como título de la gráfica
+        self.ax.set_title(f"Segmento seleccionado: {self.selected_segment} | Longitud: {self.length_m/1000:.2f} km", fontsize=12)
+        
+        ctx.add_basemap(self.ax, crs=self.gdf_segment.crs.to_string(), source=ctx.providers.OpenStreetMap.Mapnik)
+        
+        self.canvas.draw()
+    
+    def select_segment(self, item):
+        """ Actualiza la etiqueta con el segmento seleccionado y su longitud """
+        self.highlight_segment(item)
+        self.segment_label.setText(f"Segmento seleccionado: {self.selected_segment} | Longitud: {self.length_m/1000:.2f} km")
+        # Habilitar el botón de leyenda y cambiar su color
+        self.legend_button.setEnabled(True)
+        self.legend_button.setStyleSheet("background-color: #0078D7; color: white;")
+    
+    def open_legend_creator(self):
+        """ Abre la ventana de creación de leyenda y pasa la referencia de la ventana principal """
+        self.legend_window = LegendCreator(self.selected_segment, self.length_m, parent=self)
+        self.legend_window.show()
+
+    def receive_legend_data(self, legend_data):
+        """ Recibe datos de la leyenda y habilita el botón si hay contenido """
+        self.legend_data_global = legend_data
+        if self.legend_data_global:
+            self.segment_editor_button.setEnabled(True)
+            self.segment_editor_button.setStyleSheet("background-color: #0078D7; color: white;")
+        print("Datos de la leyenda:", legend_data)
+
+    def open_segment_editor(self):
+        """Abre el editor de tramos y recibe los datos guardados."""
+        if hasattr(self, 'length_m') and isinstance(self.length_m, (int, float)) and self.length_m > 0:
+            self.segment_editor = SegmentEditor(self.legend_data_global, self.length_m, self.gdf_segment, self)
+
+            # Conectar la señal a la función que procesa los datos
+            self.segment_editor.segments_saved.connect(self.process_segments)
+
+            self.segment_editor.show()
+        else:
+            QMessageBox.warning(self, "Error", "No hay una longitud válida para los tramos.")
+
+    def process_segments(self, segments):
+        """ Procesa los segmentos recibidos del editor y habilita el botón de subsecciones. """
+        print("Segmentos guardados:", segments)  # Aquí puedes hacer lo que necesites con los datos
+        self.segments = segments
+        # Activamos el botón de "Dibujar Subsecciones" tras recibir los segmentos
+        if segments:
+            self.draw_subsections_button.setEnabled(True)
+            self.draw_subsections_button.setStyleSheet("background-color: #0078D7; color: white;")
+        else:
+            self.draw_subsections_button.setEnabled(False)
+            self.draw_subsections_button.setStyleSheet("background-color: grey; color: white;")
+
+
+
+    def draw_subsections(self):
+        """ Dibuja las subsecciones en una nueva ventana a pantalla completa. """
+        # Verificar si tenemos los datos de la leyenda
+        if self.legend_data_global:  
+            # Crear la nueva ventana
+            self.full_screen_window = FullScreenPlotWindow(self)
+            self.full_screen_window.showFullScreen()  # Mostrarla a pantalla completa
+            
+            # Dibujar el gráfico en la nueva ventana
+            self.full_screen_window.plot_subsections(self.gdf_segment, self.legend_data_global, self.segments)
+        else:
+            QMessageBox.warning(self, "Error", "No hay datos de leyenda disponibles.")
+
+
+    def close_application(self):
+        """ Cierra la aplicación correctamente """
+        QApplication.quit()
+
+
+
+class LegendCreator(QWidget):
+    def __init__(self, segment_name, length_m, parent=None):
+        super().__init__(parent, Qt.Window)  # Ensure it is a separate window
+        self.parent_window = parent
+        self.segment_name = segment_name
+        self.length_m = length_m
+        self.legend_data = {}  # Diccionario para almacenar los valores de la leyenda
+        self.initUI()
+        
+
+
+    def initUI(self):
+        """ Inicializa la ventana de creación de leyenda """
+        self.setWindowTitle("Crear Leyenda")
+        self.setGeometry(200, 200, 500, 400)
+        self.setStyleSheet("background-color: #f4f4f4; font-family: Arial; font-size: 14px;")
+
         layout = QVBoxLayout()
 
-        self.first_dropdown = QComboBox()
-        self.first_dropdown.addItems(["Select Track"] + self.layers) 
-        self.first_dropdown.currentIndexChanged.connect(self.update_second_dropdown)
+        # Etiqueta con el tramo seleccionado
+        self.label = QLabel(f"📌 Segmento: {self.segment_name}\n📏 Longitud: {self.length_m/1000:.2f} km", self)
+        self.label.setStyleSheet("font-weight: bold; background-color: white; padding: 10px; border-radius: 5px;")
+        layout.addWidget(self.label)
 
-        self.second_dropdown = QComboBox()
-        self.second_dropdown.addItem("Select Option")
+        # Etiqueta para indicar qué hacer
+        self.legend_label = QLabel("Añadir nueva entrada a la leyenda:", self)
+        self.legend_label.setStyleSheet("font-weight: bold; padding: 5px;")
+        layout.addWidget(self.legend_label)
 
-        self.plot_button = QPushButton("Generate Plot")
-        self.plot_button.clicked.connect(self.generate_plot)
-        self.plot_button.setEnabled(False)
+        # Layout horizontal para los inputs
+        input_layout = QHBoxLayout()
 
-        self.toggle_button = QPushButton("⚑", self)
-        self.toggle_button.setCheckable(True)
-        self.toggle_button.setChecked(False)
-        
-        # organizamos los dos botones en una fila horizontal
-        self.grid = QGridLayout()
-        self.grid.setColumnStretch(0, 1)
-        self.grid.setColumnStretch(1, 0)
-        self.grid.addWidget(self.plot_button)
-        self.grid.addWidget(self.toggle_button)
+        # Input para el texto
+        self.text_input = QLineEdit(self)
+        self.text_input.setPlaceholderText("Texto de la leyenda")
+        self.text_input.setStyleSheet("padding: 5px; border-radius: 5px; background-color: white;")
+        input_layout.addWidget(self.text_input)
 
+        # Botón de selección de color
+        self.color_button = QPushButton("🎨 Color", self)
+        self.color_button.setStyleSheet("background-color: #D3D3D3; padding: 5px; border-radius: 5px;")
+        self.color_button.clicked.connect(self.choose_color)
+        input_layout.addWidget(self.color_button)
 
-        self.plot_canvas = PlotCanvasDrawable(self)
+        # Agregar el layout horizontal a la ventana
+        layout.addLayout(input_layout)
 
-        self.status_label = QLabel("Select values from both dropdowns.")
-        self.status_label.setAlignment(Qt.AlignCenter)
-
-        layout.addWidget(self.first_dropdown)
-        layout.addWidget(self.second_dropdown)
-        layout.addLayout(self.grid)
-        layout.addWidget(self.plot_canvas)
-        layout.addWidget(self.status_label)
-
-        self.first_tab.setLayout(layout)
-
-    def update_second_dropdown(self):
-        global gdf
-        global gdf_list
-        self.second_dropdown.clear()
-        selection = self.first_dropdown.currentText()
-
-        gdf = gpd.read_file(filename, driver="KML", layer=selection)
-        gdf_list = [gdf.iloc[[i]] for i in range(len(gdf))]
-        Names = []
-        for i in range(len(gdf_list)):
-            Names.append(gdf_list[i]["Name"].iloc[0])
-            
-        self.second_dropdown.addItems(["Select Tramo"] + Names)
-        self.plot_button.setEnabled(True)
-
-    def generate_plot(self):
-        
-        global name
-        selection = self.first_dropdown.currentText()
-        name = self.second_dropdown.currentText()
-        
-        gdf = next(gdf_part for gdf_part in gdf_list if gdf_part["Name"].iloc[0] == name)
-        
-                # Actualiza la longitud total aquí
-        
-        # Transformar a un CRS proyectado (por ejemplo, UTM o Web Mercator EPSG:3857)
-        gdf_projected = gdf.to_crs(epsg=3099)
-        # Calcular la longitud de cada tramo en metros
-        gdf_projected['length_m'] = gdf_projected.length
-        # Convertir la longitud a kilómetros
-        gdf_projected['length_km'] = gdf_projected['length_m'] / 1000
-        
-        # Mostrar las longitudes en kilómetros
-        self.longitud_total = gdf_projected['length_km'].iloc[0]
-        
-        # Actualizar la tercera pestaña con la longitud total
-        self.update_third_tab_from_first_tab()
-        
-        x,y, = gdf_projected.geometry.iloc[0].xy
-        
-        self.plot_canvas.plot(x,y,self.longitud_total)
-        self.status_label.setText(f"Longitud total del tramo {name}: {self.longitud_total:.2f} km")
-
-    def update_third_tab_from_first_tab(self):
-        # Aquí actualizamos los elementos de la tercera pestaña
-        if hasattr(self, 'third_tab'):
-            self.inicio_label.setText(f"Inicio del tramo: 0.00 km")  # O el valor que desees
-            self.fin_label.setText(f"Fin del tramo: {self.longitud_total:.2f} km")
-            self.fin_tramo_input.setText(f"{self.longitud_total:.2f}")  # Actualiza el QLineEdit
-            
-
-    # FUNCIONES PARA SEGUNDA PESTAÑA ****************************************************
-    def init_second_tab(self):
-        layout = QVBoxLayout()
-
-        # Selector de color
-        self.color_label = QLabel("Color seleccionado: Ninguno")
-        self.color_label.setAlignment(Qt.AlignCenter)
-
-        self.color_button = QPushButton("Seleccionar color")
-        self.color_button.clicked.connect(self.select_color)
-
-        # Campo de texto
-        self.text_input = QLineEdit()
-        self.text_input.setPlaceholderText("Introduce descripción aquí...")
-
-        # Botón para añadir a la leyenda
-        self.add_button = QPushButton("Añadir a la leyenda")
-        self.add_button.clicked.connect(self.add_to_legend)
-
-        # Lienzo para la leyenda
-        self.legend_canvas = PlotCanvas(self)
-
-        # Añadir widgets al layout
-        layout.addWidget(self.color_label)
-        layout.addWidget(self.color_button)
-        layout.addWidget(self.text_input)
+        # Botón para añadir la entrada
+        self.add_button = QPushButton("➕ Añadir", self)
+        self.add_button.setStyleSheet("background-color: #28A745; color: white; padding: 8px; border-radius: 5px;")
+        self.add_button.clicked.connect(self.add_legend_entry)
         layout.addWidget(self.add_button)
-        layout.addWidget(self.legend_canvas)
+
+        # Lista para mostrar la leyenda creada
+        self.legend_list = QListWidget(self)
+        self.legend_list.itemClicked.connect(self.enable_edit_delete_buttons)
+        self.legend_list.setStyleSheet("background-color: white; padding: 5px; border-radius: 5px;")
+        layout.addWidget(self.legend_list)
+
+        # Layout horizontal para los botones de editar y eliminar
+        self.edit_delete_layout = QHBoxLayout()
+
+        # Botón para editar
+        self.edit_button = QPushButton("✏ Editar", self)
+        self.edit_button.setStyleSheet("""
+            QPushButton {
+                background-color: #B0B0B0;  /* Gris apagado */
+                color: white;
+                padding: 8px;
+                border-radius: 5px;
+            }
+            QPushButton:enabled {
+                background-color: #FFA500; /* Naranja cuando esté activado */
+            }
+        """)
+        self.edit_button.setEnabled(False)
+        self.edit_button.clicked.connect(self.edit_selected_item)
+        self.edit_delete_layout.addWidget(self.edit_button)
+
+        # Botón para eliminar
+        self.delete_button = QPushButton("🗑 Eliminar", self)
+        self.delete_button.setStyleSheet("""
+            QPushButton {
+                background-color: #B0B0B0;
+                color: white;
+                padding: 8px;
+                border-radius: 5px;
+            }
+            QPushButton:enabled {
+                background-color: #DC3545; /* Rojo cuando esté activado */
+            }
+        """)
+        self.delete_button.setEnabled(False)
+        self.delete_button.clicked.connect(self.delete_selected_item)
+        self.edit_delete_layout.addWidget(self.delete_button)
+
+        layout.addLayout(self.edit_delete_layout)
 
 
-        self.second_tab.setLayout(layout)
+        # Botón para cerrar
+        self.close_button = QPushButton("🔙 Volver", self)
+        self.close_button.setStyleSheet("background-color: #9370DB; color: #000000; padding: 8px; border-radius: 5px;")
+        self.close_button.clicked.connect(self.close)
+        layout.addWidget(self.close_button)
 
-    def select_color(self):
-        # Abre un diálogo para seleccionar color
+        self.setLayout(layout)
+        
+
+    def choose_color(self):
+        """Abre un diálogo para seleccionar un color y cambia el fondo del botón"""
         color = QColorDialog.getColor()
-
         if color.isValid():
             self.selected_color = color.name()
-            self.color_label.setText(f"Color seleccionado: {self.selected_color}")
-            self.color_label.setStyleSheet(f"background-color: {self.selected_color}; color: white;")
-        else:
-            self.color_label.setText("No se seleccionó ningún color.")
-            self.selected_color = None
-
-    def add_to_legend(self):
-        # Validar que se haya seleccionado un color y que el texto no esté vacío
-        color = getattr(self, "selected_color", None)
-        text = self.text_input.text().strip()
-
-        if not color:
-            QMessageBox.warning(self, "Error", "Por favor, selecciona un color.")
-            return
-
-        if not text:
-            QMessageBox.warning(self, "Error", "Por favor, introduce una descripción.")
-            return
-
-        # Añadir el elemento a la lista de leyenda
-        self.legend_items.append((color, text))
-        self.update_legend()
-        self.update_legend_dropdown()
-
-    def update_legend(self):
-        # Dibujar la leyenda en el lienzo
-        self.legend_canvas.ax.clear()
-
-        for i, (color, text) in enumerate(self.legend_items):
-            y_pos = -i * 1  # Espaciado vertical entre elementos
-            self.legend_canvas.ax.add_patch(
-                plt.Rectangle((0, y_pos), 2, 1, color=color)  # Rectángulo para el color
-            )
-            self.legend_canvas.ax.text(2.5, y_pos + 0.5, text, va='center', fontsize=10)  # Texto asociado
-
-        # Configurar límites y ocultar ejes
-        self.legend_canvas.ax.set_xlim(-1, 10)
-        self.legend_canvas.ax.set_ylim(-len(self.legend_items) * 1.5, 1.5)
-        self.legend_canvas.ax.axis('off')
-
-        # Dibujar el canvas
-        self.legend_canvas.draw()
+            self.color_button.setStyleSheet(f"background-color: {self.selected_color}; color: white;")
             
-    def update_legend_dropdown(self):
-        self.legend_dropdown.clear()  # Limpiar el ComboBox
-        for color, text in self.legend_items:
-            self.legend_dropdown.addItem(text)  # Añadir solo el texto al ComboBox
-    
-# FUNCIONES PARA TERCERA PESTAÑA ****************************************************
-    def init_third_tab(self):
+    def add_legend_entry(self):
+        """Añade una nueva entrada al diccionario de la leyenda y la muestra en la lista"""
+        text = self.text_input.text()
+        
+        if not text:
+            return  # No añadir si el texto está vacío
+
+        color = getattr(self, "selected_color", "#000000")  # Negro por defecto
+
+        self.legend_data[text] = color  # Guardar en el diccionario
+
+        # Añadir a la lista visual con color de fondo
+        item = QListWidgetItem(text)
+        item.setBackground(QColor(color))  # Convertir a QColor antes de usar
+        item.setForeground(QColor("#FFFFFF"))  # Texto en blanco para contraste
+        self.legend_list.addItem(item)
+
+        # Limpiar inputs
+        self.text_input.clear()
+        self.selected_color = None
+        self.color_button.setStyleSheet("background-color: #D3D3D3;")
+
+    def enable_edit_delete_buttons(self):
+        """Habilita los botones de editar y eliminar cuando un elemento está seleccionado"""
+        self.edit_button.setEnabled(True)
+        self.delete_button.setEnabled(True)
+        
+    def delete_selected_item(self):
+        """Elimina el elemento seleccionado de la lista y del diccionario"""
+        selected_item = self.legend_list.currentItem()
+        if selected_item:
+            item_text = selected_item.text().split(":")[0].strip()  # Extraer la clave del diccionario
+            del self.legend_data[item_text]  # Eliminar del diccionario
+            self.legend_list.takeItem(self.legend_list.row(selected_item))  # Eliminar de la UI
+            
+            # Desactivar los botones tras la eliminación
+            self.edit_button.setEnabled(False)
+            self.delete_button.setEnabled(False)
+            
+    def edit_selected_item(self):
+        """Permite editar el color y el texto del elemento seleccionado"""
+        selected_item = self.legend_list.currentItem()
+        if not selected_item:
+            return
+
+        old_key = selected_item.text().strip()  # Extraer clave actual
+        old_value = self.legend_data[old_key]  # Obtener el color actual
+
+        # Solicitar nuevo texto
+        new_text, ok = QInputDialog.getText(self, "Editar Texto", "Nuevo significado:", text=old_key)
+        if ok and new_text.strip():
+            # Seleccionar nuevo color
+            color = QColorDialog.getColor(QColor(old_value), self, "Seleccionar nuevo color")
+            if color.isValid():
+                new_color_hex = color.name()
+
+                # Actualizar el diccionario correctamente
+                if new_text != old_key:  # Si el nombre cambió, eliminar la clave antigua
+                    del self.legend_data[old_key]
+
+                self.legend_data[new_text] = new_color_hex  # Guardar con la nueva clave
+
+                # Actualizar visualmente
+                selected_item.setText(new_text)
+                selected_item.setBackground(QColor(new_color_hex))
+
+    def closeEvent(self, event):
+        """ Pasa los datos de la leyenda a la ventana principal antes de cerrar """
+        if self.parent():
+            self.parent().receive_legend_data(self.legend_data)
+            
+        event.accept()
+           
+
+class SegmentEditor(QDialog):
+    segments_saved = Signal(list)  # Señal para enviar los segmentos a la clase principal
+
+    def __init__(self, legend_data_global, total_length, gdf_segment, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("🛠️ Editor de Tramos")
+        self.total_length = total_length
+        self.legend_data_global = legend_data_global
+        self.segment_start = 0
+        self.segment_end = total_length
+        self.segment_entries = []
+        self.gdf_segment = gdf_segment
+
+        # Estilos generales
+        self.setStyleSheet("""
+            background-color: #f4f4f4;
+            font-family: Arial;
+            font-size: 14px;
+        """)
+
+        # Layout principal
         layout = QVBoxLayout()
 
-        # Layout para la sección superior
-        top_layout = QHBoxLayout()
-
-        # Añadir los widgets de Inicio y Fin con bordes y estilos
-        self.inicio_label = QLabel("Inicio:")
-        self.inicio_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2E86C1;")
-        self.inicio_tramo_input = QLineEdit()
-        self.inicio_tramo_input.setText(f"{self.inicio_tramo:.2f}")
-        self.inicio_tramo_input.setAlignment(Qt.AlignCenter)
-        self.inicio_tramo_input.setStyleSheet("""
-            QLineEdit {
-                font-size: 14px;
-                border: 1px solid #AED6F1;
-                border-radius: 6px;
-                padding: 5px;
-            }
-        """)
-
-        self.fin_label = QLabel("Fin:")
-        self.fin_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2E86C1;")
-        self.fin_tramo_input = QLineEdit()
-        self.fin_tramo_input.setText(f"{self.longitud_total:.2f}")
-        self.fin_tramo_input.setAlignment(Qt.AlignCenter)
-        self.fin_tramo_input.setStyleSheet("""
-            QLineEdit {
-                font-size: 14px;
-                border: 1px solid #AED6F1;
-                border-radius: 6px;
-                padding: 5px;
-            }
-        """)
-
-        # Botón Finalizar estilizado
-        self.finish_button = QPushButton("Finalizar")
-        self.finish_button.clicked.connect(self.finalize_limits)
-        self.finish_button.setStyleSheet("""
-            QPushButton {
-                font-size: 16px;
-                font-weight: bold;
-                color: white;
-                background-color: #5DADE2; /* Azul brillante */
-                border: 2px solid #2E86C1;
-                border-radius: 8px;
-                padding: 8px 16px;
-            }
-            QPushButton:hover {
-                background-color: #2E86C1; /* Azul más oscuro al pasar el cursor */
-            }
-        """)
-
-        # Añadir widgets al layout de la parte superior
-        top_layout.addWidget(self.inicio_label)
-        top_layout.addWidget(self.inicio_tramo_input)
-        top_layout.addWidget(self.fin_label)
-        top_layout.addWidget(self.fin_tramo_input)
-        top_layout.addWidget(self.finish_button)
-
-        # Layout para "Inicio actual"
-        self.current_start_label = QLabel(f"Inicio actual: -")
-        self.current_start_label.setAlignment(Qt.AlignCenter)
-        self.current_start_label.setStyleSheet("""
-            QLabel {
-                font-size: 24px;           /* Tamaño de letra grande */
-                font-weight: bold;         /* Letra en negrita */
-                color: #2E86C1;            /* Color azul atractivo */
-                border: 2px solid #AED6F1; /* Borde alrededor del texto */
-                border-radius: 8px;        /* Bordes redondeados */
-                background-color: #EAF2F8; /* Fondo suave azul */
-                padding: 10px;             /* Espaciado interno */
-            }
-        """)
-        self.current_start_label.setFixedHeight(60)  # Altura fija para mayor visibilidad
-
-        # Campo para ingresar el tamaño de cada sección
-        section_layout = QHBoxLayout()
-        section_label = QLabel("Tamaño del segmento (km):")
-        self.section_size_input = QLineEdit()
-        self.section_size_input.setText("0.50")  # Valor predeterminado
-        self.section_size_input.setAlignment(Qt.AlignCenter)
-        self.section_size_input.setStyleSheet("""
-            QLineEdit {
-                font-size: 14px;
-                border: 1px solid #AED6F1;
-                border-radius: 6px;
-                padding: 5px;
-            }
-        """)
-        section_layout.addWidget(section_label)
-        section_layout.addWidget(self.section_size_input)
-
-        # Crear el ComboBox (dropdown) para mostrar las descripciones de la leyenda
-        self.legend_dropdown = QComboBox()
-        self.legend_dropdown.setStyleSheet("""
-            QComboBox {
-                font-size: 14px;
-                border: 1px solid #AED6F1;
-                border-radius: 6px;
-                padding: 5px;
-            }
-        """)
+        # Sección para definir inicio y fin del tramo
+        self.range_layout = QHBoxLayout()
         
-        # Añadir el ComboBox al layout encima del botón de agregar tramo
-        section_layout.addWidget(self.legend_dropdown)
+        self.start_label = QLabel("🚦 Inicio:")
+        self.start_label.setStyleSheet("padding: 5px; font-weight: bold;")
+        self.start_input = QLineEdit()
+        self.start_input.setPlaceholderText(f"{self.segment_start:.0f}")
+        self.start_input.setFixedWidth(80)
+        self.start_input.setStyleSheet("background-color: white; padding: 5px; border-radius: 5px;")
 
-        # Botones para agregar segmentos y finalizar proceso
-        self.add_segment_button = QPushButton("Agregar Tramo")
-        self.add_segment_button.clicked.connect(self.add_segment)
-        self.add_segment_button.setEnabled(False)  # Deshabilitado hasta que se finalice el tramo
-        self.add_segment_button.setStyleSheet("""
-            QPushButton {
-                font-size: 16px;
-                font-weight: bold;
-                color: white;
-                background-color: #58D68D; /* Verde brillante */
-                border: 2px solid #28B463;
-                border-radius: 8px;
-                padding: 8px 16px;
-            }
-            QPushButton:hover {
-                background-color: #28B463; /* Verde más oscuro al pasar el cursor */
-            }
-        """)
+        self.end_label = QLabel("🏁 Fin:")
+        self.end_label.setStyleSheet("padding: 5px; font-weight: bold;")
+        self.end_input = QLineEdit()
+        self.end_input.setPlaceholderText(f"{math.floor(self.segment_end):.0f}")
+        self.end_input.setFixedWidth(80)
+        self.end_input.setStyleSheet("background-color: white; padding: 5px; border-radius: 5px;")
 
-        # Añadir todo al layout principal
-        layout.addLayout(top_layout)  # Layout superior (Inicio, Fin, Finalizar)
-        layout.addWidget(self.current_start_label)  # Visible y estilizado
-        layout.addLayout(section_layout)  # Campo de tamaño de segmento
-        layout.addWidget(self.add_segment_button)  # Botón para agregar segmentos
-        
-        self.third_tab.setLayout(layout)
+        self.set_range_button = QPushButton("📍 Establecer Rango")
+        self.set_range_button.setStyleSheet("background-color: #0078D7; color: white; padding: 6px; border-radius: 5px;")
+        self.set_range_button.clicked.connect(self.set_segment_range)
 
+        self.range_layout.addWidget(self.start_label)
+        self.range_layout.addWidget(self.start_input)
+        self.range_layout.addWidget(QLabel("m"))
+        self.range_layout.addWidget(self.end_label)
+        self.range_layout.addWidget(self.end_input)
+        self.range_layout.addWidget(QLabel("m"))
+        self.range_layout.addWidget(self.set_range_button)
+        layout.addLayout(self.range_layout)
 
+        # Etiqueta de longitud total
+        self.label = QLabel(f"📏 Longitud Total: {self.total_length:.0f} m")
+        self.label.setStyleSheet("font-weight: bold; padding: 5px;")
+        layout.addWidget(self.label)
 
+        # Botón para agregar secciones
+        self.add_segment_button = QPushButton("➕ Agregar Sección")
+        self.add_segment_button.setStyleSheet("background-color: grey; color: white; padding: 8px; border-radius: 5px;")
+        self.add_segment_button.setEnabled(False)  # Hasta definir rango
+        self.add_segment_button.clicked.connect(self.add_segment_entry)
+        layout.addWidget(self.add_segment_button)
 
+        # Contenedor de segmentos
+        self.segment_container = QVBoxLayout()
+        layout.addLayout(self.segment_container)
 
-    def finalize_limits(self):
+        # Espaciador flexible
+        layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+        # Botón para guardar
+        self.save_button = QPushButton("💾 Guardar Tramos")
+        self.save_button.setStyleSheet("background-color: grey; color: white; padding: 8px; border-radius: 5px;")
+        self.save_button.setEnabled(False)
+        self.save_button.clicked.connect(self.save_segments)
+        layout.addWidget(self.save_button)
+
+        # Botón para cancelar
+        self.exit_button = QPushButton("❌ Cancelar")
+        self.exit_button.setStyleSheet("background-color: #DC3545; color: white; padding: 8px; border-radius: 5px;")
+        self.exit_button.clicked.connect(self.close)
+        layout.addWidget(self.exit_button)
+
+        self.setLayout(layout)
+
+    def set_segment_range(self):
+        """Define el rango válido para los segmentos."""
         try:
-            # Leer valores de inicio y fin del tramo
-            inicio_tramo = float(self.inicio_tramo_input.text())
-            fin_tramo = float(self.fin_tramo_input.text())
+            start = float(self.start_input.text())
+            end = float(self.end_input.text())
 
-            if inicio_tramo >= fin_tramo:
-                QMessageBox.warning(self, "Error", "El inicio del tramo debe ser menor que el fin.")
-                return
+            if start < 0 or end <= start or end > self.total_length:
+                raise ValueError
 
-            # Actualizar límites y bloquear inputs
-            self.inicio_tramo = inicio_tramo
-            self.fin_tramo = fin_tramo
-            self.inicio_tramo_input.setEnabled(False)
-            self.fin_tramo_input.setEnabled(False)
+            self.segment_start = start
+            self.segment_end = end
+            self.label.setText(f"📏 Longitud Seleccionada: {start:.0f} m → {end:.0f} m")
 
-            # Inicializar current_start y actualizar la etiqueta
-            self.current_start = self.inicio_tramo
-            self.current_start_label.setText(f"Inicio actual: {self.current_start:.2f} km")
-
-            # Habilitar botón para agregar segmentos
+            # Habilitar botón de agregar sección
             self.add_segment_button.setEnabled(True)
-
-            QMessageBox.information(self, "Rango Establecido", "El rango del tramo ha sido establecido correctamente.")
+            self.add_segment_button.setStyleSheet("background-color: #28A745; color: white; padding: 8px; border-radius: 5px;")
         except ValueError:
-            QMessageBox.warning(self, "Error", "Por favor, ingresa valores válidos para los límites.")
+            QMessageBox.warning(self, "⚠️ Error", "Ingrese valores válidos para el rango.")
 
-    def add_segment(self):
-        try:
-            # Leer tamaño del segmento
-            segment_size = float(self.section_size_input.text())
+    def add_segment_entry(self):
+        """Agrega una nueva sección dentro del rango definido."""
+        hbox = QHBoxLayout()
 
-            if segment_size <= 0:
-                QMessageBox.warning(self, "Error", "El tamaño del segmento debe ser mayor a 0.")
-                return
-
-            # Calcular fin del tramo actual
-            current_end = self.current_start + segment_size
-
-            # Verificar que no exceda el fin del tramo
-            if current_end > self.fin_tramo:
-                QMessageBox.warning(self, "Error", "El tramo excede el rango total.")
-                return
-
-            # Agregar tramo a la lista
-            self.tramos.append((self.current_start, current_end))
-
-            # Actualizar current_start y etiqueta
-            self.current_start = current_end
-            self.current_start_label.setText(f"Inicio actual: {self.current_start:.2f} km")
-
-            # Habilitar botón de finalizar proceso si hay al menos un tramo
-            # self.finish_process_button.setEnabled(True)
-
-            # Mostrar mensaje de confirmación
-            QMessageBox.information(
-                self,
-                "Tramo Agregado",
-                f"Tramo agregado: {self.tramos[-1][0]:.2f} km - {self.tramos[-1][1]:.2f} km"
-            )
-
-            # Deshabilitar botón si se alcanza el fin del tramo
-            if self.current_start >= self.fin_tramo:
-                QMessageBox.information(self, "Proceso Finalizado", "Se han completado todos los tramos.")
-                self.add_segment_button.setEnabled(False)
-        except ValueError:
-            QMessageBox.warning(self, "Error", "Por favor, ingresa un tamaño válido para el segmento.")
-
-    def finish_process(self):
-        if self.tramos:
-            print("Tramos finalizados:", self.tramos)
-            QMessageBox.information(self, "Proceso Finalizado", "Los tramos han sido procesados correctamente.")
+        # Si ya hay entradas de segmento, el inicio de la nueva sección será el final de la última
+        if self.segment_entries:
+            last_start, last_end, _ = self.segment_entries[-1]
+            start_value = float(last_end.text())  # Obtén el valor de 'end' de la última sección
         else:
-            QMessageBox.warning(self, "Error", "No se han definido tramos.")
+            start_value = 0  # Si no hay secciones, el valor de inicio será 0
+
+        label = QLabel(f"Sección {len(self.segment_entries) + 1}:")
+        label.setStyleSheet("padding: 5px;")
+
+        start_entry = QLineEdit(f"{start_value:.0f}")
+        start_entry.setFixedWidth(80)
+        start_entry.setStyleSheet("background-color: white; padding: 5px; border-radius: 5px;")
+
+        # Aquí puedes definir la lógica de cómo calcular el valor de 'end'
+        end_value = self.segment_end  # Un ejemplo, donde el final es siempre 1000 unidades más que el inicio
+        end_entry = QLineEdit(f"{end_value:.0f}")
+        end_entry.setFixedWidth(80)
+        end_entry.setStyleSheet("background-color: white; padding: 5px; border-radius: 5px;")
+
+        legend_dropdown = QComboBox()
+        legend_dropdown.addItems(self.legend_data_global)
+        legend_dropdown.setStyleSheet("background-color: white; padding: 5px; border-radius: 5px;")
+
+        remove_button = QPushButton("❌")
+        remove_button.setFixedSize(30, 30)
+        remove_button.setStyleSheet("background-color: #DC3545; color: white; border-radius: 5px;")
+        remove_button.clicked.connect(lambda: self.remove_segment_entry(hbox, start_entry, end_entry))
+
+        hbox.addWidget(label)
+        hbox.addWidget(start_entry)
+        hbox.addWidget(QLabel("m"))
+        hbox.addWidget(end_entry)
+        hbox.addWidget(QLabel("m"))
+        hbox.addWidget(legend_dropdown)
+        hbox.addWidget(remove_button)
+
+        self.segment_container.addLayout(hbox)
+        self.segment_entries.append((start_entry, end_entry, legend_dropdown))
+
+        start_entry.textChanged.connect(self.validate_segments)
+        end_entry.textChanged.connect(self.validate_segments)
+
+        self.validate_segments()
+
+    def remove_segment_entry(self, hbox, start_entry, end_entry):
+        """Elimina una sección ingresada."""
+        for i in reversed(range(hbox.count())):
+            widget = hbox.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+
+        self.segment_entries.remove((start_entry, end_entry))
+        self.validate_segments()
+
+    def validate_segments(self):
+        """Valida los segmentos antes de habilitar el botón de guardar."""
+        valid = True
+        for start_entry, end_entry, _ in self.segment_entries:
+            try:
+                start = float(start_entry.text())
+                end = float(end_entry.text())
+
+                if start < self.segment_start or end > self.segment_end or end <= start:
+                    valid = False
+                    break
+            except ValueError:
+                valid = False
+                break
+
+        if valid:
+            self.save_button.setEnabled(True)
+            self.save_button.setStyleSheet("background-color: #28A745; color: white; padding: 8px; border-radius: 5px;")
+        else:
+            self.save_button.setEnabled(False)
+            self.save_button.setStyleSheet("background-color: grey; color: white; padding: 8px; border-radius: 5px;")
+
+    def save_segments(self):
+        """Guarda los segmentos y envía los datos a la clase principal."""
+        segments = self.get_segments_data()
+        if segments:
+            self.segments_saved.emit(segments)
+            self.accept()
+
+    def get_segments_data(self):
+        """Devuelve la información de los segmentos ingresados."""
+        segments = []
+        for start_entry, end_entry, legend_dropdown in self.segment_entries:
+            try:
+                start = float(start_entry.text())
+                end = float(end_entry.text())
+                segment_type = legend_dropdown.currentText()  # Obtener el tipo seleccionado
+
+                segments.append({
+                    "start": start,
+                    "end": end,
+                    "type": segment_type
+                })
+            except ValueError:
+                continue  # Ignorar valores inválidos
+
+        return segments
+
+
+
+class FullScreenPlotWindow(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Subsecciones de Tramo")
+        self.setGeometry(0, 0, QApplication.primaryScreen().size().width(), QApplication.primaryScreen().size().height())  # Ventana a pantalla completa
+        self.setStyleSheet("background-color: #f4f4f4;")
+
+        # Crear la figura y el lienzo
+        self.figure, self.ax = plt.subplots(figsize=(20, 16))  # Tamaño grande para pantalla completa
+        self.ax.axis("off")  # No mostrar los ejes
+        self.canvas = FigureCanvas(self.figure)
         
-    # FUNCIONES PARA PANEL DE NAVEGACION ****************************************************
-    def go_to_previous_tab(self):
-        current_index = self.tab_widget.currentIndex()
-        self.tab_widget.setCurrentIndex(current_index - 1)
-        self.update_navigation_buttons()
+        # Layout para la ventana
+        layout = QVBoxLayout()
+        layout.addWidget(self.canvas)
+        self.setLayout(layout)
 
-    def go_to_next_tab(self):
-        current_index = self.tab_widget.currentIndex()
-        self.tab_widget.setCurrentIndex(current_index + 1)    
+class FullScreenPlotWindow(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Subsecciones de Tramo")
+        self.setGeometry(0, 0, QApplication.primaryScreen().size().width(), QApplication.primaryScreen().size().height())  # Pantalla completa
+        self.setStyleSheet("background-color: #f4f4f4;")
 
-        self.update_navigation_buttons()
-
-    def update_navigation_buttons(self):
-        current_index = self.tab_widget.currentIndex()
-        total_tabs = self.tab_widget.count()
-
-        self.previous_button.setEnabled(current_index > 0)
-        self.next_button.setEnabled(current_index < total_tabs - 1)
-
-
-def LoadKmlDialog():
-    qfd = QFileDialog()
-    filename = QFileDialog.getOpenFileName(qfd, 'Cargar KML', "./", "kml(*.kml)")[0]
-    layers = fiona.listlayers(filename)
-    return filename, layers
+        # Crear la figura y el lienzo
+        self.figure, self.ax = plt.subplots(figsize=(20, 16))  # Tamaño grande
+        self.ax.axis("off")  # No mostrar ejes
+        self.canvas = FigureCanvas(self.figure)
         
+        # Layout de la ventana
+        layout = QVBoxLayout()
+        layout.addWidget(self.canvas)
+        self.setLayout(layout)
 
+
+
+    def plot_subsections(self, gdf_segment, legend_data, segments):
+        """Dibuja los segmentos troceados con los colores asignados y coloca la leyenda en un subplot separado."""
+
+        # Limpiar figura
+        self.figure.clear()
+
+        # Crear subgráficos: (1, 2) significa 1 fila, 2 columnas
+        self.ax = self.figure.add_subplot(121)  # Subplot para el mapa (columna 1)
+        self.ax_legend = self.figure.add_subplot(122)  # Subplot para la leyenda (columna 2)
+        self.ax_legend.axis("off")  # Quitar ejes en la leyenda
+
+        # Dibujar el mapa en `self.ax`
+        self.ax.axis("off")
+
+
+        # Asignar colores a los segmentos basados en su tipo
+        for segment in segments:
+            segment["color"] = legend_data[segment["type"]]  # Asignar el color de la leyenda
+            
+        # Dividir la línea en segmentos
+        gdf_subsegments = split_line_variable_lengths(
+            gdf_segment, segments,
+            start_distance=segments[0]['start'],
+            end_distance=segments[-1]['end']
+        )
+
+        # Extraer geometría
+        gdf_subsegments = gdf_subsegments.geometry
+
+        # Dibujar los subsegmentos con sus colores
+        for i, geom in enumerate(gdf_subsegments):
+            x, y = geom.xy
+            self.ax.plot(x, y, color=segments[i]["color"], linewidth=2)
+
+        # Añadir mapa base
+        ctx.add_basemap(self.ax, crs=gdf_segment.crs.to_string(), source=ctx.providers.OpenStreetMap.Mapnik)
+
+        # Dibujar la leyenda en `self.ax_legend`
+        for idx, (label, color) in enumerate(legend_data.items()):
+            self.ax_legend.add_patch(plt.Rectangle((0, idx * 0.1), 0.2, 0.05, color=color, transform=self.ax_legend.transAxes, clip_on=False))
+            self.ax_legend.text(0.3, idx * 0.1 + 0.025, label.upper(), verticalalignment='center', fontsize=12, horizontalalignment='left', transform=self.ax_legend.transAxes)
+
+        # Dibujar la actualización en la GUI
+        self.canvas.draw()
+
+
+
+        
+        
+        
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon(str(Path(__file__).parent / "resources" / "icon.ico")))
-    filename, layers = LoadKmlDialog()
-    main_window = MainWindow(layers)
-    main_window.show()
-    sys.exit(app.exec_())
+    app = QApplication.instance()  # Asegura que no haya otra instancia de QApplication
+    if app is None:
+        app = QApplication(sys.argv)
+    window = FileSelector()
+    window.show()
+    app.exec()
