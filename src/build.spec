@@ -5,7 +5,7 @@ a = Analysis(
     ['mapasWRC.py'],
     pathex=[],
     binaries=[],
-    datas=[('./resources/icon.ico', './resources/')],
+    datas=[('./resources/icon.ico', './resources/'),('./resources/proj.db', './resources/')],
     hiddenimports=['fiona._shim','pkg_resources.extern', 'rasterio.sample'],
     hookspath=[],
     hooksconfig={},
