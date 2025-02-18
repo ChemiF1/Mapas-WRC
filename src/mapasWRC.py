@@ -6,7 +6,6 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PySide6.QtCore import Signal
 import sys
 import os
-from pathlib import Path
 import geopandas as gpd
 import fiona
 import matplotlib.pyplot as plt
@@ -14,8 +13,6 @@ import contextily as ctx
 import math
 from shapely.geometry import LineString
 from shapely.ops import substring
-
-os.environ['PROJ_LIB'] = str(Path(__file__).parent / 'resources')
 
 fiona.drvsupport.supported_drivers['kml'] = 'rw' # enable KML support which is disabled by default
 fiona.drvsupport.supported_drivers['KML'] = 'rw' # enable KML support which is disabled by default
@@ -66,6 +63,7 @@ class FileSelector(QWidget):
         self.selected_segment = None  # Segmento seleccionado
         self.length_m = 0  # Longitud del segmento seleccionado
         self.gdf_segment = None
+        self.legend_data_global = None  # Datos de la leyenda
         self.initUI()
 
     def initUI(self):
@@ -250,8 +248,8 @@ class FileSelector(QWidget):
         self.legend_button.setStyleSheet("background-color: #0078D7; color: white;")
     
     def open_legend_creator(self):
-        """ Abre la ventana de creación de leyenda y pasa la referencia de la ventana principal """
-        self.legend_window = LegendCreator(self.selected_segment, self.length_m, parent=self)
+        """ Abre la ventana de creación de leyenda y pasa los datos guardados si existen """
+        self.legend_window = LegendCreator(self.selected_segment, self.length_m, parent=self, existing_data=self.legend_data_global)
         self.legend_window.show()
 
     def receive_legend_data(self, legend_data):
@@ -263,16 +261,22 @@ class FileSelector(QWidget):
         print("Datos de la leyenda:", legend_data)
 
     def open_segment_editor(self):
-        """Abre el editor de tramos y recibe los datos guardados."""
+        """Abre el editor de tramos y carga los segmentos previamente guardados, si existen."""
         if hasattr(self, 'length_m') and isinstance(self.length_m, (int, float)) and self.length_m > 0:
-            self.segment_editor = SegmentEditor(self.legend_data_global, self.length_m, self.gdf_segment, self)
-
+            # Recupera los segmentos guardados previamente o una lista vacía
+            previous_segments = self.segments if hasattr(self, 'segments') and self.segments else []
+            
+            self.segment_editor = SegmentEditor(self.legend_data_global,
+                                                self.length_m,
+                                                self.gdf_segment,
+                                                previous_segments,
+                                                self)
             # Conectar la señal a la función que procesa los datos
             self.segment_editor.segments_saved.connect(self.process_segments)
-
             self.segment_editor.show()
         else:
             QMessageBox.warning(self, "Error", "No hay una longitud válida para los tramos.")
+
 
     def process_segments(self, segments):
         """ Procesa los segmentos recibidos del editor y habilita el botón de subsecciones. """
@@ -309,13 +313,27 @@ class FileSelector(QWidget):
 
 
 class LegendCreator(QWidget):
-    def __init__(self, segment_name, length_m, parent=None):
-        super().__init__(parent, Qt.Window)  # Ensure it is a separate window
+    def __init__(self, segment_name, length_m, parent=None, existing_data=None):
+        super().__init__(parent, Qt.Window)
         self.parent_window = parent
         self.segment_name = segment_name
         self.length_m = length_m
-        self.legend_data = {}  # Diccionario para almacenar los valores de la leyenda
+        self.legend_data = existing_data if existing_data else {}  # Si hay datos previos, los usa
+        
+        # Asegurar que "Desconocido" siempre esté presente
+        if "Desconocido" not in self.legend_data:
+            self.legend_data["Desconocido"] = "#000000"
+            
         self.initUI()
+        self.populate_existing_data()  # Llenar la lista con datos previos
+
+    def populate_existing_data(self):
+        """Carga los datos previos en la lista de la leyenda"""
+        for text, color in self.legend_data.items():
+            item = QListWidgetItem(text)
+            item.setBackground(QColor(color))
+            item.setForeground(QColor("#FFFFFF"))  # Texto blanco para contraste
+            self.legend_list.addItem(item)
         
 
 
@@ -463,13 +481,14 @@ class LegendCreator(QWidget):
             self.delete_button.setEnabled(False)
             
     def edit_selected_item(self):
-        """Permite editar el color y el texto del elemento seleccionado"""
+        """Permite editar el color y el texto del elemento seleccionado manteniendo su posición"""
         selected_item = self.legend_list.currentItem()
         if not selected_item:
             return
 
-        old_key = selected_item.text().strip()  # Extraer clave actual
-        old_value = self.legend_data[old_key]  # Obtener el color actual
+        index = self.legend_list.row(selected_item)  # Guardar índice actual
+        old_key = selected_item.text().strip()  # Obtener el texto original
+        old_value = self.legend_data[old_key]  # Obtener el color original
 
         # Solicitar nuevo texto
         new_text, ok = QInputDialog.getText(self, "Editar Texto", "Nuevo significado:", text=old_key)
@@ -479,18 +498,25 @@ class LegendCreator(QWidget):
             if color.isValid():
                 new_color_hex = color.name()
 
-                # Actualizar el diccionario correctamente
-                if new_text != old_key:  # Si el nombre cambió, eliminar la clave antigua
-                    del self.legend_data[old_key]
+                # Actualizar el diccionario manteniendo la posición
+                keys = list(self.legend_data.keys())  # Copia de claves en orden
+                values = list(self.legend_data.values())  # Copia de valores en orden
+                
+                # Modificar en la posición correcta
+                keys[index] = new_text
+                values[index] = new_color_hex
+                
+                # Reconstruir el diccionario manteniendo el orden
+                self.legend_data = dict(zip(keys, values))
 
-                self.legend_data[new_text] = new_color_hex  # Guardar con la nueva clave
-
-                # Actualizar visualmente
+                # Actualizar visualmente la lista en la posición original
                 selected_item.setText(new_text)
                 selected_item.setBackground(QColor(new_color_hex))
 
+
     def closeEvent(self, event):
         """ Pasa los datos de la leyenda a la ventana principal antes de cerrar """
+            
         if self.parent():
             self.parent().receive_legend_data(self.legend_data)
             
@@ -500,15 +526,18 @@ class LegendCreator(QWidget):
 class SegmentEditor(QDialog):
     segments_saved = Signal(list)  # Señal para enviar los segmentos a la clase principal
 
-    def __init__(self, legend_data_global, total_length, gdf_segment, parent=None):
+    def __init__(self, legend_data_global, total_length, gdf_segment, previous_segments=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("🛠️ Editor de Tramos")
         self.total_length = total_length
         self.legend_data_global = legend_data_global
         self.segment_start = 0
         self.segment_end = total_length
-        self.segment_entries = []
+        self.segment_entries = []  # Guardará tuplas de (start_entry, end_entry, legend_dropdown)
         self.gdf_segment = gdf_segment
+
+        # Almacenar los segmentos previos (si los hay)
+        self.previous_segments = previous_segments if previous_segments is not None else []
 
         # Estilos generales
         self.setStyleSheet("""
@@ -584,6 +613,9 @@ class SegmentEditor(QDialog):
 
         self.setLayout(layout)
 
+        # Si existen segmentos previos, cárgalos en la interfaz
+        self.load_previous_segments()
+
     def set_segment_range(self):
         """Define el rango válido para los segmentos."""
         try:
@@ -603,16 +635,30 @@ class SegmentEditor(QDialog):
         except ValueError:
             QMessageBox.warning(self, "⚠️ Error", "Ingrese valores válidos para el rango.")
 
-    def add_segment_entry(self):
-        """Agrega una nueva sección dentro del rango definido."""
+    def add_segment_entry(self, start_value=None, end_value=None, selected_legend=None):
+        """Agrega una nueva sección dentro del rango definido.
+           Si se pasan valores, se usan para pre-cargar la sección."""
         hbox = QHBoxLayout()
 
-        # Si ya hay entradas de segmento, el inicio de la nueva sección será el final de la última
-        if self.segment_entries:
+        # Si no se ha definido el valor de inicio, usar el final de la última sección o 0
+        if self.segment_entries and start_value is None:
             last_start, last_end, _ = self.segment_entries[-1]
-            start_value = float(last_end.text())  # Obtén el valor de 'end' de la última sección
-        else:
-            start_value = 0  # Si no hay secciones, el valor de inicio será 0
+            start_value = float(last_end.text())
+        elif start_value is None:
+            start_value = 0
+
+        # Si no se define el valor final, usar el final del rango
+        if end_value is None:
+            end_value = self.segment_end
+
+        # Si no se define el tipo de leyenda, usar el primero
+        if selected_legend is None:
+            if isinstance(self.legend_data_global, dict) and self.legend_data_global:
+                selected_legend = list(self.legend_data_global.keys())[0]
+            elif isinstance(self.legend_data_global, list) and self.legend_data_global:
+                selected_legend = self.legend_data_global[0]
+            else:
+                selected_legend = "Default"  # O cualquier valor por defecto que tenga sentido
 
         label = QLabel(f"Sección {len(self.segment_entries) + 1}:")
         label.setStyleSheet("padding: 5px;")
@@ -621,14 +667,13 @@ class SegmentEditor(QDialog):
         start_entry.setFixedWidth(80)
         start_entry.setStyleSheet("background-color: white; padding: 5px; border-radius: 5px;")
 
-        # Aquí puedes definir la lógica de cómo calcular el valor de 'end'
-        end_value = self.segment_end  # Un ejemplo, donde el final es siempre 1000 unidades más que el inicio
         end_entry = QLineEdit(f"{end_value:.0f}")
         end_entry.setFixedWidth(80)
         end_entry.setStyleSheet("background-color: white; padding: 5px; border-radius: 5px;")
 
         legend_dropdown = QComboBox()
         legend_dropdown.addItems(self.legend_data_global)
+        legend_dropdown.setCurrentText(selected_legend)
         legend_dropdown.setStyleSheet("background-color: white; padding: 5px; border-radius: 5px;")
 
         remove_button = QPushButton("❌")
@@ -652,6 +697,14 @@ class SegmentEditor(QDialog):
 
         self.validate_segments()
 
+    def load_previous_segments(self):
+        """Carga en la interfaz los segmentos guardados previamente."""
+        for segment in self.previous_segments:
+            self.add_segment_entry(segment["start"], segment["end"], segment["type"])
+            
+        # Validar segmentos inmediatamente después de cargarlos
+        self.validate_segments()
+
     def remove_segment_entry(self, hbox, start_entry, end_entry):
         """Elimina una sección ingresada."""
         for i in reversed(range(hbox.count())):
@@ -659,7 +712,11 @@ class SegmentEditor(QDialog):
             if widget:
                 widget.setParent(None)
 
-        self.segment_entries.remove((start_entry, end_entry))
+        # Eliminar la entrada correspondiente (buscarla en segment_entries)
+        for entry in self.segment_entries:
+            if entry[0] is start_entry and entry[1] is end_entry:
+                self.segment_entries.remove(entry)
+                break
         self.validate_segments()
 
     def validate_segments(self):
@@ -692,8 +749,13 @@ class SegmentEditor(QDialog):
             self.accept()
 
     def get_segments_data(self):
-        """Devuelve la información de los segmentos ingresados."""
+        """Devuelve la información de los segmentos ingresados y completa los tramos vacíos."""
         segments = []
+        
+        # Obtener el primer valor de legend_dropdown
+        default_legend = list(self.legend_data_global.keys())[0] if isinstance(self.legend_data_global, dict) else self.legend_data_global[0]
+
+        # Recoger los segmentos definidos por el usuario
         for start_entry, end_entry, legend_dropdown in self.segment_entries:
             try:
                 start = float(start_entry.text())
@@ -708,7 +770,38 @@ class SegmentEditor(QDialog):
             except ValueError:
                 continue  # Ignorar valores inválidos
 
-        return segments
+        # Ordenar segmentos por inicio para detectar huecos
+        segments.sort(key=lambda x: x["start"])
+
+        # Crear nueva lista con segmentos faltantes
+        full_segments = []
+        current_start = self.segment_start
+
+        for segment in segments:
+            seg_start, seg_end, seg_type = segment["start"], segment["end"], segment["type"]
+
+            # Si hay una brecha antes del segmento actual, llenarla con el valor por defecto
+            if current_start < seg_start:
+                full_segments.append({
+                    "start": current_start,
+                    "end": seg_start,
+                    "type": default_legend
+                })
+
+            # Agregar el segmento actual
+            full_segments.append(segment)
+            current_start = seg_end  # Actualizar el punto de inicio para la siguiente iteración
+
+        # Si hay un hueco al final, agregarlo también
+        if current_start < self.segment_end:
+            full_segments.append({
+                "start": current_start,
+                "end": self.segment_end,
+                "type": default_legend
+            })
+
+        return full_segments
+
 
 
 
