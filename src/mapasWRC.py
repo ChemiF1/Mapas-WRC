@@ -6,6 +6,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PySide6.QtCore import Signal
 import sys
 import os
+from pathlib import Path
 import geopandas as gpd
 import fiona
 import matplotlib.pyplot as plt
@@ -14,8 +15,13 @@ import math
 from shapely.geometry import LineString
 from shapely.ops import substring
 
+os.environ['PROJ_LIB'] = str(Path(__file__).parent / 'resources')
+
 fiona.drvsupport.supported_drivers['kml'] = 'rw' # enable KML support which is disabled by default
 fiona.drvsupport.supported_drivers['KML'] = 'rw' # enable KML support which is disabled by default
+
+
+
 
 
 
